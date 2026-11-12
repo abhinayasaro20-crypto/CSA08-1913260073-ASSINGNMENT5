@@ -1,0 +1,35 @@
+[6:59 pm, 12/11/2026] Abhinaya: mport csv
+import io
+import sqlite3
+
+
+def inspect_csv(text):
+
+    if not text.strip():
+        print("Error: CSV file is empty.")
+        return
+
+    reader = csv.DictReader(io.StringIO(text))
+    required = {"station", "date", "pm25"}
+
+    if not reader.fieldnames or not required.issubset(reader.fieldnames):
+        print("Error: Missing required column or incorrect delimiter.")
+        return
+
+    print("CSV header is valid.")
+
+    for row in reader:
+        print(row)
+
+
+print("TEST 1 - Missing column")
+inspect_csv("station,date\nAdyar,2026-10-01")
+
+print("\nTEST 2 - Wrong delimiter")
+inspect_csv("station;date;pm25\nAdyar;2026-10-01;48")
+
+print("\nTEST 3 - Different text encoding")
+
+try:
+    sample = "station,date,pm25\nAdyar,2026-10-01,48".encode("utf-8")…
+[6:59 pm, 12/11/2026] Abhinaya: 
