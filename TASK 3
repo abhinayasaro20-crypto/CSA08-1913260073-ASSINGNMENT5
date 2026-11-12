@@ -1,0 +1,189 @@
+import random
+import time
+import statistics
+import cProfile
+import sqlite3
+
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+import pandas as pd
+
+
+def generate_data(station_count):
+
+    random.seed(42)
+
+    start = datetime(2025, 1, 1)
+    rows = []
+
+    for station_number in range(station_count):
+
+        station = f"Station_{station_number + 1}"
+
+        for hour_number in range(8760):
+
+            reading_time = start + timedelta(hours=hour_number)
+
+            rows.append((
+                station,
+                reading_time.strftime("%Y-%m-%d"),
+                round(random.uniform(5, 150), 2)
+            ))
+
+    return rows
+
+
+def python_loop(rows):
+
+    totals = defaultdict(float)
+    counts = defaultdict(int)
+
+    for station, day, pm25 in rows:
+
+        key = (station, day)
+
+        totals[key] += pm25
+        counts[key] += 1
+
+    return {
+        key: totals[key] / counts[key]
+        for key in totals
+    }
+
+
+def pandas_groupby(rows):
+
+    frame = pd.DataFrame(
+        rows,
+        columns=["station", "day", "pm25"]
+    )
+
+    return frame.groupby(
+        ["station", "day"]
+    )["pm25"].mean().to_dict()
+
+
+def sql_groupby(rows):
+
+    connection = sqlite3.connect(":memory:")
+
+    connection.execute("""
+        CREATE TABLE readings (
+            station TEXT,
+            day TEXT,
+            pm25 REAL
+        )
+    """)
+
+    connection.executemany(
+        "INSERT INTO readings VALUES (?, ?, ?)",
+        rows
+    )
+
+    result = connection.execute("""
+        SELECT station, day, AVG(pm25)
+        FROM readings
+        GROUP BY station, day
+    """).fetchall()
+
+    connection.close()
+
+    return {
+        (station, day): mean
+        for station, day, mean in result
+    }
+
+
+def benchmark(function, rows, repetitions=3):
+
+    times = []
+
+    for _ in range(repetitions):
+
+        start = time.perf_counter()
+
+        function(rows)
+
+        times.append(time.perf_counter() - start)
+
+    return statistics.median(times)
+
+
+if _name_ == "_main_":
+
+    # B3.1 - Correctness on small data
+
+    small_data = [
+        ("Adyar", "2026-10-01", 48.0),
+        ("Adyar", "2026-10-01", 52.0),
+        ("Guindy", "2026-10-01", 95.0),
+        ("Guindy", "2026-10-01", 105.0),
+        ("Adyar", "2026-10-02", 60.0)
+    ]
+
+    loop_result = python_loop(small_data)
+
+    pandas_result = pandas_groupby(small_data)
+
+    sql_result = sql_groupby(small_data)
+
+    print("Python loop:", loop_result)
+    print("Pandas:", pandas_result)
+    print("SQL:", sql_result)
+
+    assert loop_result.keys() == pandas_result.keys() == sql_result.keys()
+
+    for key in loop_result:
+
+        assert abs(loop_result[key] - pandas_result[key]) < 1e-9
+
+        assert abs(loop_result[key] - sql_result[key]) < 1e-9
+
+    print("All three methods agree.")
+
+
+    # B3.2 - Benchmark 1, 12 and 120 stations
+
+    for number_of_stations in (1, 12, 120):
+
+        data = generate_data(number_of_stations)
+
+        print(f"\nStations: {number_of_stations}")
+
+        print("Number of readings:", len(data))
+
+        print(
+            "Python loop:",
+            benchmark(python_loop, data),
+            "seconds"
+        )
+
+        print(
+            "Pandas:",
+            benchmark(pandas_groupby, data),
+            "seconds"
+        )
+
+        print(
+            "SQL:",
+            benchmark(sql_groupby, data),
+            "seconds"
+        )
+
+
+    # B3.3 - Profile Python loop on the largest dataset
+
+    largest_data = generate_data(120)
+
+    print("\nCProfile output for Python loop:")
+
+    profiler = cProfile.Profile()
+
+    profiler.enable()
+
+    python_loop(largest_data)
+
+    profiler.disable()
+
+    profiler.print_stats(sort="cumtime")
