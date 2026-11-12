@@ -1,0 +1,279 @@
+import re
+import sqlite3
+import time
+
+from collections import Counter
+
+
+POSITIVE = {
+    "good", "clean", "fast", "helpful", "improved"
+}
+
+NEGATIVE = {
+    "bad", "dirty", "slow", "rude", "smoke", "broken"
+}
+
+NEGATORS = {
+    "not", "never", "no"
+}
+
+
+def score(text):
+
+    words = text.lower().replace(".", " ").replace(",", " ").split()
+
+    total = 0
+
+    # TODO 1 completed
+
+    for index, word in enumerate(words):
+
+        value = (
+            1 if word in POSITIVE
+            else -1 if word in NEGATIVE
+            else 0
+        )
+
+        if index > 0 and words[index - 1] in NEGATORS:
+            value = -value
+
+        total += value
+
+    return total
+
+
+def label(text):
+
+    value = score(text)
+
+    if value > 0:
+        return "positive"
+
+    if value < 0:
+        return "negative"
+
+    return "neutral"
+
+
+STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "and",
+    "but", "to", "of", "in", "on", "from", "this", "that"
+}
+
+
+def summarise(text, number_of_sentences=1):
+
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+
+    words = re.findall(r"[A-Za-z]+", text.lower())
+
+    frequencies = Counter(
+        word for word in words
+        if word not in STOP_WORDS
+    )
+
+    ranked_sentences = []
+
+    for position, sentence in enumerate(sentences):
+
+        sentence_words = re.findall(
+            r"[A-Za-z]+",
+            sentence.lower()
+        )
+
+        sentence_score = sum(
+            frequencies[word]
+            for word in sentence_words
+            if word not in STOP_WORDS
+        )
+
+        ranked_sentences.append(
+            (sentence_score, position, sentence)
+        )
+
+    selected = sorted(
+        sorted(ranked_sentences, reverse=True)[:number_of_sentences],
+        key=lambda item: item[1]
+    )
+
+    return " ".join(
+        item[2] for item in selected
+    )
+
+
+# At least 50 complaint examples
+
+complaints = [
+    "Roads are clean and buses are fast.",
+    "Smoke is bad near the school.",
+    "The response team was helpful.",
+    "The road is dirty and the air is bad.",
+    "Service improved near the station.",
+    "The bus is slow during peak hours.",
+    "Factory smoke makes the air bad.",
+    "Street cleaning is good today.",
+    "The staff were not helpful.",
+    "The road repair is broken and slow."
+] * 5
+
+
+# Initial reference labels
+
+manual_labels = [
+    "positive", "negative", "positive", "negative", "positive",
+    "negative", "negative", "positive", "negative", "negative"
+] * 5
+
+
+predicted_labels = [
+    label(complaint)
+    for complaint in complaints
+]
+
+
+agreement_count = sum(
+    predicted == actual
+    for predicted, actual in zip(predicted_labels, manual_labels)
+)
+
+
+agreement_percentage = (
+    agreement_count / len(complaints) * 100
+)
+
+
+print("Number of complaints:", len(complaints))
+
+print("Number of agreements:", agreement_count)
+
+print(
+    "Agreement percentage:",
+    round(agreement_percentage, 2),
+    "%"
+)
+
+
+print("\nSentiment and summaries:")
+
+for complaint in complaints[:10]:
+
+    print(
+        label(complaint),
+        "|",
+        summarise(complaint)
+    )
+
+
+print("\nExample of a possible incorrect interpretation:")
+
+example = "The air is not bad, but the smoke is terrible."
+
+print("Complaint:", example)
+
+print("Predicted label:", label(example))
+
+
+# B4.2 - Create sample database and compare query time before/after index
+
+connection = sqlite3.connect("air_quality_index_test.db")
+
+
+connection.execute("""
+    CREATE TABLE IF NOT EXISTS readings (
+        station_id INTEGER,
+        reading_date TEXT,
+        pm25 REAL
+    )
+""")
+
+
+# Add sample records only when the table is empty
+
+existing = connection.execute(
+    "SELECT COUNT(*) FROM readings"
+).fetchone()[0]
+
+
+if existing == 0:
+
+    sample_rows = [
+        (
+            station_id,
+            f"2026-10-{day:02d}",
+            float((station_id * day) % 150 + 1)
+        )
+        for station_id in range(1, 101)
+        for day in range(1, 32)
+    ]
+
+    connection.executemany(
+        "INSERT INTO readings VALUES (?, ?, ?)",
+        sample_rows
+    )
+
+    connection.commit()
+
+
+query = """
+    SELECT AVG(pm25)
+    FROM readings
+    WHERE station_id = ?
+      AND reading_date BETWEEN ? AND ?
+"""
+
+
+parameters = (
+    10,
+    "2026-10-01",
+    "2026-10-31"
+)
+
+
+start = time.perf_counter()
+
+for _ in range(1000):
+
+    connection.execute(
+        query,
+        parameters
+    ).fetchone()
+
+before_index = time.perf_counter() - start
+
+
+connection.execute("""
+    CREATE INDEX IF NOT EXISTS idx_station_date
+    ON readings(station_id, reading_date)
+""")
+
+connection.commit()
+
+
+start = time.perf_counter()
+
+for _ in range(1000):
+
+    connection.execute(
+        query,
+        parameters
+    ).fetchone()
+
+after_index = time.perf_counter() - start
+
+
+print("\nQuery time before index:", before_index, "seconds")
+
+print("Query time after index:", after_index, "seconds")
+
+
+print("\nQuery plan:")
+
+for row in connection.execute(
+    "EXPLAIN QUERY PLAN " + query,
+    parameters
+):
+
+    print(row)
+
+
+connection.close()
