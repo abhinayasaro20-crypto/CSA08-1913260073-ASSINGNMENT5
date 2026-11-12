@@ -1,0 +1,223 @@
+import csv
+import io
+import sqlite3
+import matplotlib.pyplot as plt
+
+RAW = """station,date,hour,pm25,pm10,no_value,temperature,unit
+Adyar,2026-10-01,8,48,70,12,86,F
+Adyar,2026-10-02,8,NA,65,10,87,F
+Adyar,2026-10-03,8,,68,11,88,F
+Guindy,2026-10-01,8,95,120,18,29,C
+Guindy,2026-10-02,8,-5,110,16,30,C
+Guindy,2026-10-03,8,121,140,20,31,C
+Adyar,2026-10-04,8,1200,130,15,89,F
+Adyar,2026-10-01,8,48,70,12,86,F
+"""
+
+REQUIRED = {
+    "station", "date", "hour", "pm25", "pm10",
+    "no_value", "temperature", "unit"
+}
+
+
+def load_and_clean(csv_text):
+    reader = csv.DictReader(io.StringIO(csv_text))
+
+    if not reader.fieldnames or not REQUIRED.issubset(reader.fieldnames):
+        raise ValueError("CSV is missing required columns.")
+
+    cleaned = []
+    seen = set()
+    rejected = []
+
+    for line_number, row in enumerate(reader, start=2):
+        try:
+            station = row["station"].strip().title()
+            date = row["date"].strip()
+            hour = int(row["hour"])
+            pm25_text = (row["pm25"] or "").strip()
+
+            if not pm25_text or pm25_text.upper() == "NA":
+                rejected.append((line_number, "Missing PM2.5"))
+                continue
+
+            pm25 = float(pm25_text)
+
+            if pm25 < 0 or pm25 > 999:
+                rejected.append((line_number, "PM2.5 outside valid range"))
+                continue
+
+            if not 0 <= hour <= 23:
+                rejected.append((line_number, "Invalid hour"))
+                continue
+
+            temperature = float(row["temperature"])
+
+            if row["unit"].strip().upper() == "F":
+                temperature = (temperature - 32) * 5 / 9
+
+            key = (station, date, hour)
+
+            if key in seen:
+                rejected.append((line_number, "Duplicate reading"))
+                continue
+
+            seen.add(key)
+
+            cleaned.append({
+                "station": station,
+                "date": date,
+                "hour": hour,
+                "pm25": pm25,
+                "pm10": float(row["pm10"]),
+                "no_value": float(row["no_value"]),
+                "temperature_c": round(temperature, 2)
+            })
+
+        except (ValueError, TypeError, KeyError) as error:
+            rejected.append((line_number, f"Invalid row: {error}"))
+
+    return cleaned, rejected
+
+
+def store_and_query(rows):
+    con = sqlite3.connect("air_quality.db")
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS readings (
+            station TEXT,
+            reading_date TEXT,
+            hour INTEGER,
+            pm25 REAL,
+            pm10 REAL,
+            no_value REAL,
+            temperature_c REAL,
+            PRIMARY KEY(station, reading_date, hour)
+        )
+    """)
+
+    con.executemany("""
+        INSERT OR REPLACE INTO readings
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, [
+        (r["station"], r["date"], r["hour"], r["pm25"],
+         r["pm10"], r["no_value"], r["temperature_c"])
+        for r in rows
+    ])
+
+    con.commit()
+
+    print("\nQ1 - Average PM2.5 at Adyar in October:")
+    print(con.execute("""
+        SELECT AVG(pm25) FROM readings
+        WHERE station = ? AND reading_date >= ? AND reading_date < ?
+    """, ("Adyar", "2026-10-01", "2026-11-01")).fetchone()[0])
+
+    print("\nQ2 - Station with highest average PM2.5:")
+    print(con.execute("""
+        SELECT station, AVG(pm25) AS average_pm25
+        FROM readings
+        GROUP BY station
+        ORDER BY average_pm25 DESC LIMIT 1
+    """).fetchone())
+
+    print("\nQ3 - Date with highest reading:")
+    print(con.execute("""
+        SELECT reading_date, MAX(pm25)
+        FROM readings
+        GROUP BY reading_date
+        ORDER BY MAX(pm25) DESC LIMIT 1
+    """).fetchone())
+
+    daily = con.execute("""
+        SELECT reading_date, AVG(pm25)
+        FROM readings
+        GROUP BY reading_date ORDER BY reading_date
+    """).fetchall()
+
+    station_means = con.execute("""
+        SELECT station, AVG(pm25)
+        FROM readings
+        GROUP BY station ORDER BY station
+    """).fetchall()
+
+    scatter = con.execute("""
+        SELECT temperature_c, pm25 FROM readings
+    """).fetchall()
+
+    hourly = con.execute("""
+        SELECT hour, AVG(pm25)
+        FROM readings
+        GROUP BY hour ORDER BY hour
+    """).fetchall()
+
+    con.close()
+
+    return daily, station_means, scatter, hourly
+
+
+def make_charts(daily, station_means, scatter, hourly):
+
+    if daily:
+        x, y = zip(*daily)
+        plt.figure()
+        plt.plot(x, y, marker="o")
+        plt.xlabel("Date")
+        plt.ylabel("Mean PM2.5")
+        plt.title("Daily PM2.5 Trend")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig("daily_pm25_trend.png")
+        plt.close()
+
+    if station_means:
+        x, y = zip(*station_means)
+        plt.figure()
+        plt.bar(x, y)
+        plt.xlabel("Station")
+        plt.ylabel("Mean PM2.5")
+        plt.title("PM2.5 Comparison by Station")
+        plt.tight_layout()
+        plt.savefig("station_comparison.png")
+        plt.close()
+
+    if scatter:
+        x, y = zip(*scatter)
+        plt.figure()
+        plt.scatter(x, y)
+        plt.xlabel("Temperature (C)")
+        plt.ylabel("PM2.5")
+        plt.title("Temperature vs PM2.5")
+        plt.tight_layout()
+        plt.savefig("temperature_vs_pm25.png")
+        plt.close()
+
+    if hourly:
+        x, y = zip(*hourly)
+        plt.figure()
+        plt.bar(x, y)
+        plt.xlabel("Hour")
+        plt.ylabel("Mean PM2.5")
+        plt.title("Mean PM2.5 by Hour")
+        plt.tight_layout()
+        plt.savefig("hourly_pm25.png")
+        plt.close()
+
+
+if _name_ == "_main_":
+
+    cleaned_rows, rejected_rows = load_and_clean(RAW)
+
+    print("CLEANED DATA:")
+    for item in cleaned_rows:
+        print(item)
+
+    print("\nREJECTED ROWS:")
+    for item in rejected_rows:
+        print(item)
+
+    daily_data, station_data, scatter_data, hourly_data = store_and_query(cleaned_rows)
+
+    make_charts(daily_data, station_data, scatter_data, hourly_data)
+
+    print("\nCharts saved as PNG files.")
